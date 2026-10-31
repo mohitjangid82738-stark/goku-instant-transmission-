@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#020713">
+<title>GOKU - Instant Transmission</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;background:#020713;color:#d9faff;
+ font-family:Arial,sans-serif;overflow:hidden
+}
+#app{
+ width:100%;height:100dvh;position:relative;
+ background:radial-gradient(ellipse at center,#07365b 0%,#020713 75%);
+}
+#screen{
+ position:absolute;inset:0;width:100%;height:100%;
+}
+#video{display:none}
+.hud{
+ position:absolute;top:18px;left:0;width:100%;
+ text-align:center;z-index:5;pointer-events:none;
+}
+h1{
+ margin:5px;font-size:clamp(16px,4vw,24px);
+ letter-spacing:3px;color:#63eaff;
+ text-shadow:0 0 15px #00bfff,0 0 30px #007bff;
+}
+#status{
+ font-size:10px;letter-spacing:2px;color:#a6edff;
+ margin-top:10px;padding:0 12px;
+}
+.panel{
+ position:absolute;bottom:15px;left:12px;right:12px;
+ padding:14px 8px;z-index:6;text-align:center;
+ border:1px solid #00cfff99;border-radius:18px;
+ background:#031a2cee;
+ box-shadow:0 0 25px #007bff44,inset 0 0 20px #007bff11;
+}
+button{
+ background:#062c49;color:#b9f6ff;
+ border:1px solid #00cfff;border-radius:10px;
+ padding:13px 15px;margin:4px;
+ font-weight:bold;font-size:12px;letter-spacing:1px;
+}
+button:active{background:#087cb1}
+button:disabled{opacity:.5}
+#start{background:#006da5}
+.small{font-size:10px;color:#91cddd;margin-top:10px}
+#flash{
+ position:absolute;inset:0;background:#8beeff;
+ opacity:0;z-index:4;pointer-events:none;
+}
+#loader{
+ position:absolute;inset:0;z-index:3;
+ display:flex;align-items:center;justify-content:center;
+ color:#6deaff;text-align:center;font-size:12px;
+ letter-spacing:2px;pointer-events:none;
+}
+</style>
+</head>
+
+<body>
+<div id="app">
+
+ <video id="video" autoplay playsinline muted></video>
+ <canvas id="screen"></canvas>
+ <div id="flash"></div>
+
+ <div id="loader">GOKU SYSTEM READY</div>
+
+ <div class="hud">
+  <h1>GOKU // INSTANT TRANSMISSION</h1>
+  <div id="status">SYSTEM STANDBY</div>
+ </div>
+
+ <div class="panel">
+  <button id="start">ACTIVATE CAMERA</button>
+  <button id="manual">TELEPORT</button>
+  <button id="stop">STOP</button>
+
+  <div class="small">
+   Place two fingers near your forehead
+  </div>
+
+  <div class="small" id="gesture">
+   GESTURE SCANNER: STANDBY
+  </div>
+ </div>
+</div>
+
+<!-- FIXED MEDIAPIPE VERSIONS -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/selfie_segmentation.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
+
+<script>
+"use strict";
+
+const video=document.getElementById("video");
+const canvas=document.getElementById("screen");
+const ctx=canvas.getContext("2d");
+
+const statusText=document.getElementById("status");
+const gestureText=document.getElementById("gesture");
+const flash=document.getElementById("flash");
+const loader=document.getElementById("loader");
+
+let stream=null;
+let running=false;
+let initializing=false;
+
+let segmentation=null;
+let hands=null;
+let face=null;
+
+let foreground=null;
+let handData=null;
+let faceData=null;
+
+let teleported=false;
+let gestureStart=0;
+let lastTrigger=0;
+let particles=[];
+let frameBusy=false;
+let animationId=0;
+
+function status(text){
+ statusText.textContent=text;
+}
+
+function resize(){
+ const d=Math.min(window.devicePixelRatio||1,1.5);
+ canvas.width=Math.round(innerWidth*d);
+ canvas.height=Math.round(innerHeight*d);
+}
+window.addEventListener("resize",resize);
+resize();
+
+/* PARTICLE SYSTEM */
+
+function createParticles(){
+
+ particles=[];
+
+ if(!foreground)return;
+
+ const w=foreground.width;
+ const h=foreground.height;
+
+ const data=foreground.getContext("2d")
+  .getImageData(0,0,w,h).data;
+
+ const sx=canvas.width/w;
+ const sy=canvas.height/h;
+
+ for(let y=0;y<h;y+=6){
+
+  for(let x=0;x<w;x+=6){
+
+   const index=(y*w+x)*4;
+
+   if(data[index+3]>100 && Math.random()<0.65){
+
+    const angle=Math.random()*Math.PI*2;
+    const speed=1+Math.random()*6;
+
+    particles.push({
+     x:x*sx,
+     y:y*sy,
+     vx:Math.cos(angle)*speed,
+     vy:Math.sin(angle)*speed,
+     life:45+Math.random()*50,
+     size:1+Math.random()*3
+    });
+
+   }
+  }
+ }
+}
+
+function drawParticles(){
+
+ for(let i=particles.length-1;i>=0;i--){
+
+  const p=particles[i];
+
+  p.x+=p.vx;
+  p.y+=p.vy;
+
+  p.vx*=0.985;
+  p.vy*=0.985;
+  p.life--;
+
+  const alpha=Math.max(0,p.life/90);
+
+  ctx.fillStyle=`rgba(40,215,255,${alpha})`;
+  ctx.shadowColor="#00cfff";
+  ctx.shadowBlur=15;
+
+  ctx.fillRect(p.x,p.y,p.size,p.size);
+
+  if(p.life<=0){
+   particles.splice(i,1);
+  }
+ }
+ ctx.shadowBlur=0;
+}
+
+/* BLUE LIGHTNING */
+
+function drawLightning(){
+
+ if(!foreground)return;
+
+ ctx.save();
+
+ ctx.globalCompositeOperation="screen";
+ ctx.strokeStyle="#5beaff";
+ ctx.shadowColor="#00aaff";
+ ctx.shadowBlur=18;
+ ctx.lineWidth=2;
+
+ for(let i=0;i<7;i++){
+
+  let x=Math.random()*canvas.width;
+  let y=Math.random()*canvas.height*.8;
+
+  ctx.beginPath();
+  ctx.moveTo(x,y);
+
+  for(let j=0;j<8;j++){
+
+   x+=(Math.random()-.5)*35;
+   y+=12+Math.random()*25;
+
+   ctx.lineTo(x,y);
+  }
+
+  ctx.stroke();
+ }
+
+ ctx.restore();
+}
+
+/* TELEPORT */
+
+function teleport(){
+
+ if(!running)return;
+
+ if(!teleported){
+
+  try{
+   createParticles();
+  }catch(e){
+   console.warn("Particle generation:",e);
+  }
+
+  teleported=true;
+
+  status("INSTANT TRANSMISSION // DISAPPEARING");
+
+  flash.style.opacity=".35";
+
+  setTimeout(()=>{
+   flash.style.opacity="0";
+  },150);
+
+ }else{
+
+  teleported=false;
+
+  status("RE-MATERIALIZING // ONLINE");
+
+  flash.style.opacity=".45";
+
+  setTimeout(()=>{
+   flash.style.opacity="0";
+  },180);
+ }
+}
+
+/* GESTURE TRACKING */
+
+function fingerUp(lm,tip,pip){
+ return lm[tip].y<lm[pip].y;
+}
+
+function checkGesture(){
+
+ if(!handData || !faceData ||
+    !faceData.multiFaceLandmarks ||
+    faceData.multiFaceLandmarks.length===0){
+
+  gestureStart=0;
+  gestureText.textContent="SCANNING FACE...";
+  return;
+ }
+
+ const forehead=faceData.multiFaceLandmarks[0][10];
+
+ let detected=false;
+
+ const list=handData.multiHandLandmarks||[];
+
+ for(const lm of list){
+
+  const index=fingerUp(lm,8,6);
+  const middle=fingerUp(lm,12,10);
+
+  const ring=!fingerUp(lm,16,14);
+  const pinky=!fingerUp(lm,20,18);
+
+  const mx=(lm[8].x+lm[12].x)/2;
+  const my=(lm[8].y+lm[12].y)/2;
+
+  const distance=Math.hypot(
+   mx-forehead.x,
+   my-forehead.y
+  );
+
+  if(index&&middle&&ring&&pinky&&distance<0.20){
+   detected=true;
+   break;
+  }
+ }
+
+ if(detected){
+
+  gestureText.textContent="GOKU GESTURE DETECTED";
+
+  if(!gestureStart){
+   gestureStart=Date.now();
+  }
+
+  if(Date.now()-gestureStart>800 &&
+     Date.now()-lastTrigger>2500){
+
+   lastTrigger=Date.now();
+   gestureStart=0;
+
+   teleport();
+  }
+
+ }else{
+
+  gestureStart=0;
+  gestureText.textContent="GESTURE SCANNER: SEARCHING";
+ }
+}
+
+/* DRAWING */
+
+function render(){
+
+ if(!running)return;
+
+ const w=canvas.width;
+ const h=canvas.height;
+
+ ctx.clearRect(0,0,w,h);
+
+ ctx.fillStyle="#020713";
+ ctx.fillRect(0,0,w,h);
+
+ // Background camera
+ ctx.save();
+ ctx.globalAlpha=.16;
+ ctx.filter="brightness(.5) saturate(.4)";
+ ctx.drawImage(video,0,0,w,h);
+ ctx.restore();
+
+ // Visible person
+ if(foreground && !teleported){
+
+  ctx.save();
+
+  ctx.globalCompositeOperation="screen";
+  ctx.shadowColor="#00bfff";
+  ctx.shadowBlur=25;
+
+  ctx.drawImage(foreground,0,0,w,h);
+
+  ctx.restore();
+
+  // Holographic blue effect
+  ctx.save();
+
+  ctx.globalCompositeOperation="screen";
+  ctx.globalAlpha=.28;
+  ctx.filter="saturate(2) brightness(1.7)";
+
+  ctx.drawImage(foreground,0,0,w,h);
+
+  ctx.restore();
+
+  drawLightning();
+ }
+
+ drawParticles();
+
+ if(teleported && particles.length===0){
+  status("TRANSMISSION COMPLETE // INVISIBLE");
+ }
+
+ animationId=requestAnimationFrame(render);
+}
+
+/* INITIALIZE AI MODELS */
+
+async function initializeAI(){
+
+ status("LOADING AI SYSTEM...");
+
+ // IMPORTANT: initialize one engine at a time.
+ // Do not use Promise.all() here.
+
+ segmentation=new SelfieSegmentation({
+  locateFile:file=>
+   `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/${file}`
+ });
+
+ segmentation.setOptions({
+  modelSelection:1
+ });
+
+ segmentation.onResults(results=>{
+
+  if(!foreground){
+   foreground=document.createElement("canvas");
+  }
+
+  const w=results.image.width;
+  const h=results.image.height;
+
+  if(foreground.width!==w || foreground.height!==h){
+   foreground.width=w;
+   foreground.height=h;
+  }
+
+  const fc=foreground.getContext("2d");
+
+  fc.clearRect(0,0,w,h);
+  fc.drawImage(results.image,0,0,w,h);
+
+  fc.globalCompositeOperation="destination-in";
+  fc.drawImage(results.segmentationMask,0,0,w,h);
+
+  fc.globalCompositeOperation="source-over";
+ });
+
+ await segmentation.initialize();
+
+ status("LOADING HAND TRACKING...");
+
+ hands=new Hands({
+  locateFile:file=>
+   `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+ });
+
+ hands.setOptions({
+  maxNumHands:1,
+  modelComplexity:0,
+  minDetectionConfidence:.65,
+  minTrackingConfidence:.6
+ });
+
+ hands.onResults(results=>{
+  handData=results;
+ });
+
+ await hands.initialize();
+
+ status("LOADING FACE TRACKING...");
+
+ face=new FaceMesh({
+  locateFile:file=>
+   `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${file}`
+ });
+
+ face.setOptions({
+  maxNumFaces:1,
+  refineLandmarks:false,
+  minDetectionConfidence:.6,
+  minTrackingConfidence:.6
+ });
+
+ face.onResults(results=>{
+  faceData=results;
+ });
+
+ await face.initialize();
+}
+
+/* CAMERA START */
+
+async function startCamera(){
+
+ if(running||initializing)return;
+
+ initializing=true;
+
+ document.getElementById("start").disabled=true;
+
+ try{
+
+  if(!navigator.mediaDevices ||
+     !navigator.mediaDevices.getUserMedia){
+
+   throw new Error("HTTPS camera access required");
+  }
+
+  status("REQUESTING CAMERA...");
+
+  stream=await navigator.mediaDevices.getUserMedia({
+
+   audio:false,
+
+   video:{
+    facingMode:"user",
+    width:{ideal:480},
+    height:{ideal:360},
+    frameRate:{ideal:20,max:24}
+   }
+
+  });
+
+  video.srcObject=stream;
+
+  await video.play();
+
+  await initializeAI();
+
+  running=true;
+
+  loader.style.display="none";
+
+  status("GOKU SYSTEM ONLINE");
+
+  render();
+
+  processFrames();
+
+ }catch(error){
+
+  console.error(error);
+
+  status("SYSTEM ERROR");
+
+  loader.style.display="flex";
+
+  loader.textContent=
+   "ERROR: "+(error.message||"Unknown error");
+
+  if(stream){
+   stream.getTracks().forEach(t=>t.stop());
+   stream=null;
+  }
+
+  alert(
+   "System start nahi hua.\n\n"+
+   "1. Chrome camera permission check karo.\n"+
+   "2. Internet connection check karo.\n"+
+   "3. Page HTTPS par hona chahiye.\n\n"+
+   error.message
+  );
+
+ }finally{
+
+  initializing=false;
+
+  document.getElementById("start").disabled=false;
+ }
+}
+
+/* PROCESS CAMERA FRAMES */
+
+async function processFrames(){
+
+ while(running){
+
+  if(!frameBusy && video.readyState>=2){
+
+   frameBusy=true;
+
+   try{
+
+    await segmentation.send({image:video});
+
+    await hands.send({image:video});
+
+    await face.send({image:video});
+
+    checkGesture();
+
+   }catch(error){
+
+    console.error("Frame error:",error);
+    status("PROCESSING ERROR");
+
+   }
+
+   frameBusy=false;
+  }
+
+  await new Promise(resolve=>setTimeout(resolve,70));
+ }
+}
+
+/* STOP */
+
+async function stopCamera(){
+
+ running=false;
+ initializing=false;
+
+ cancelAnimationFrame(animationId);
+
+ if(stream){
+  stream.getTracks().forEach(t=>t.stop());
+  stream=null;
+ }
+
+ video.srcObject=null;
+
+ try{
+  if(segmentation)await segmentation.close();
+  if(hands)await hands.close();
+  if(face)await face.close();
+ }catch(e){
+  console.warn(e);
+ }
+
+ segmentation=null;
+ hands=null;
+ face=null;
+
+ foreground=null;
+ handData=null;
+ faceData=null;
+
+ teleported=false;
+ particles=[];
+ gestureStart=0;
+
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+
+ loader.style.display="flex";
+ loader.textContent="GOKU SYSTEM READY";
+
+ status("SYSTEM STANDBY");
+
+ gestureText.textContent="GESTURE SCANNER: OFF";
+}
+
+/* BUTTONS */
+
+document.getElementById("start").onclick=startCamera;
+
+document.getElementById("manual").onclick=()=>{
+ teleport();
+};
+
+document.getElementById("stop").onclick=stopCamera;
+
+</script>
+</body>
+</html>
