@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#05070d"><title>Goku Camera Effects</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#05070d;color:#eaf6ff;font-family:system-ui,Arial;min-height:100vh;display:flex;flex-direction:column;align-items:center}header{width:100%;padding:14px 16px;text-align:center;background:#0a1220;border-bottom:1px solid #18334c}h1{font-size:19px;letter-spacing:2px;margin:0}header p{font-size:11px;color:#8caac2;margin:5px 0 0}.stage{position:relative;width:min(100vw,760px);aspect-ratio:3/4;background:#000;overflow:hidden;margin:12px auto;border:1px solid #1d3549;border-radius:14px}canvas{width:100%;height:100%;display:block;transform:scaleX(-1)}video{display:none}.hud{position:absolute;left:10px;top:10px;padding:6px 9px;background:#07111dcc;border:1px solid #34516a;border-radius:8px;font-size:11px;color:#bce8ff}.controls{width:min(100% - 24px,760px);display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:10px}button{border:1px solid #2e5978;background:#10243a;color:#eaf6ff;padding:12px 9px;border-radius:10px;font-weight:650;font-size:13px}button.primary{background:#07518b;border-color:#32aaff}.hint{width:min(100% - 28px,740px);font-size:12px;line-height:1.55;color:#a8bdce;margin:0 0 20px}.hint b{color:#e5f6ff}.status{color:#7fe1ff}.error{color:#ffb4a8}
+</style>
+</head>
+<body>
+<header><h1>GOKU CAMERA EFFECTS</h1><p>INSTANT TRANSMISSION · KAMEHAMEHA</p></header>
+<div class="stage"><video id="video" playsinline muted></video><canvas id="view"></canvas><div class="hud" id="status">CAMERA OFFLINE</div></div>
+<div class="controls"><button class="primary" id="start">START CAMERA</button><button id="stop">STOP CAMERA</button><button id="teleport">TEST INSTANT TRANSMISSION</button><button id="beam">TEST KAMEHAMEHA</button></div>
+<p class="hint"><b>Gestures:</b> Two fingers (index + middle) raised near your forehead trigger Instant Transmission. For Kamehameha, bring both hands close together to charge, then push them toward the camera to release the beam. <br><b>Note:</b> Effects appear only in this browser preview; Android does not let a normal webpage replace WhatsApp's camera feed. Keep the page open over HTTPS and allow camera access.</p>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
+<script>
+(()=>{
+const video=document.getElementById('video'),canvas=document.getElementById('view'),ctx=canvas.getContext('2d');
+const statusEl=document.getElementById('status');let stream=null,hands=null,segmenter=null,running=false,raf=0,lastHands=[],lastMask=null;
+let teleport={phase:'idle',t:0},charge=0,beamUntil=0,lastHandSize=0,pushBase=0,particles=[];
+const W=720,H=960;canvas.width=W;canvas.height=H;
+function status(s,err=false){statusEl.textContent=s;statusEl.className='hud'+(err?' error':'')}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+function triggerTeleport(){if(teleport.phase!=='idle')return;teleport={phase:'out',t:performance.now()};}
+function triggerBeam(){beamUntil=performance.now()+850;charge=0;}
+function drawCamera(){if(!video.videoWidth)return;ctx.save();ctx.clearRect(0,0,W,H);ctx.drawImage(video,0,0,W,H);ctx.restore()}
+function drawPersonMask(alpha){if(!lastMask||!video.videoWidth)return;const off=document.createElement('canvas');off.width=W;off.height=H;const oc=off.getContext('2d');oc.drawImage(video,0,0,W,H);oc.globalCompositeOperation='destination-in';oc.drawImage(lastMask,0,0,W,H);ctx.save();ctx.globalAlpha=alpha;ctx.drawImage(off,0,0);ctx.restore()}
+function drawTeleport(now){if(teleport.phase==='idle')return;const elapsed=now-teleport.t;const duration=1050;if(elapsed>duration){teleport.phase='idle';return}const p=elapsed/duration;
+// Clean, neutral instant-transmission: brief soft white exposure pulse, no blue aura.
+if(p<.42){const a=Math.sin((p/.42)*Math.PI/2)*.94;ctx.save();ctx.fillStyle=`rgba(255,255,255,${a})`;ctx.fillRect(0,0,W,H);ctx.restore()}
+else if(p<.58){ctx.save();ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);ctx.restore()}
+else{const a=1-Math.min(1,(p-.58)/.42);ctx.save();ctx.fillStyle=`rgba(255,255,255,${a*.88})`;ctx.fillRect(0,0,W,H);ctx.restore()}
+}
+function drawCharge(now){if(charge<=0)return;const x=W/2,y=H*.53,r=18+charge*40;ctx.save();ctx.globalCompositeOperation='screen';const g=ctx.createRadialGradient(x,y,2,x,y,r*2.1);g.addColorStop(0,'rgba(255,255,255,.98)');g.addColorStop(.22,'rgba(91,206,255,.95)');g.addColorStop(.58,'rgba(0,113,255,.48)');g.addColorStop(1,'rgba(0,90,255,0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r*2.1,0,Math.PI*2);ctx.fill();ctx.strokeStyle='rgba(150,225,255,.9)';ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(x,y,r*1.2,r*.72,now*.002,0,Math.PI*2);ctx.stroke();ctx.restore()}
+function drawBeam(now){if(now>beamUntil)return;const p=(beamUntil-now)/850;ctx.save();ctx.globalCompositeOperation='screen';const x=W/2,y=H*.53;const grad=ctx.createLinearGradient(x,y,x,H*.02);grad.addColorStop(0,'rgba(255,255,255,.95)');grad.addColorStop(.16,'rgba(100,215,255,.95)');grad.addColorStop(.55,'rgba(0,120,255,.6)');grad.addColorStop(1,'rgba(0,100,255,0)');ctx.fillStyle=grad;ctx.shadowColor='#3bbcff';ctx.shadowBlur=32;ctx.beginPath();ctx.moveTo(x-16,y);ctx.lineTo(x-70*p,H*.02);ctx.lineTo(x+70*p,H*.02);ctx.lineTo(x+16,y);ctx.closePath();ctx.fill();ctx.fillStyle=`rgba(220,250,255,${.75*p})`;ctx.beginPath();ctx.ellipse(x,y,30,18,0,0,Math.PI*2);ctx.fill();ctx.restore()}
+function fingersRaised(lm){return lm[8].y<lm[6].y&&lm[12].y<lm[10].y&&lm[16].y>lm[14].y}
+function onHands(results){lastHands=results.multiHandLandmarks||[];if(lastHands.length>=2){const a=lastHands[0],b=lastHands[1];const mid={x:(a[8].x+b[8].x)/2,y:(a[8].y+b[8].y)/2};const gap=dist(a[8],b[8]);const size=(dist(a[0],a[9])+dist(b[0],b[9]))/2;
+ if(gap<.22){charge=Math.min(1,charge+.035);if(!pushBase)pushBase=size;}else if(charge>.35){if(size>pushBase*1.22){triggerBeam();pushBase=0;}else{charge=Math.max(0,charge-.012)}}else{charge=Math.max(0,charge-.03);pushBase=0}
+ }else{charge=Math.max(0,charge-.025);pushBase=0}
+ if(lastHands.length===1&&fingersRaised(lastHands[0])){const lm=lastHands[0];if(lm[8].y<.34&&lm[12].y<.34&&teleport.phase==='idle')triggerTeleport()}
+}
+async function frame(){if(!running)return;try{if(hands&&video.readyState>=2)await hands.send({image:video});}catch(e){}drawCamera();const now=performance.now();drawCharge(now);drawBeam(now);drawTeleport(now);raf=requestAnimationFrame(frame)}
+async function start(){try{if(!window.isSecureContext){status('HTTPS REQUIRED',true);return}if(!navigator.mediaDevices?.getUserMedia){status('CAMERA NOT SUPPORTED',true);return}status('REQUESTING CAMERA…');stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:720},height:{ideal:960}},audio:false});video.srcObject=stream;await video.play();
+ if(!window.Hands||!window.SelfieSegmentation){status('AI LIBRARY LOAD FAILED — CHECK INTERNET',true);return}
+ hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});hands.setOptions({maxNumHands:2,modelComplexity:0,minDetectionConfidence:.65,minTrackingConfidence:.6});hands.onResults(onHands);
+ // Selfie segmentation is optional; camera remains normal if unavailable.
+ try{segmenter=new SelfieSegmentation({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}`});segmenter.setOptions({modelSelection:0});segmenter.onResults(r=>{lastMask=r.segmentationMask||null})}catch(e){segmenter=null}
+ running=true;status('CAMERA ONLINE · SHOW YOUR HANDS');frame();}catch(e){status('CAMERA ERROR: ALLOW PERMISSION & RETRY',true)}}
+function stop(){running=false;cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;status('CAMERA OFFLINE')}
+document.getElementById('start').onclick=start;document.getElementById('stop').onclick=stop;document.getElementById('teleport').onclick=triggerTeleport;document.getElementById('beam').onclick=triggerBeam;
+// Segmentation runs at a lower rate separately to keep hand tracking responsive.
+setInterval(async()=>{if(running&&segmenter&&video.readyState>=2){try{await segmenter.send({image:video})}catch(e){}}},100);
+window.addEventListener('pagehide',stop);
+})();
+</script>
+</body></html>
