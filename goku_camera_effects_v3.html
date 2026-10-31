@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#05070d">
+<title>Goku Camera FX — Enhanced</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(ellipse at 50% 0%,#10233a 0,#05070d 55%);color:#eaf6ff;font-family:system-ui,Arial;min-height:100vh;display:flex;flex-direction:column;align-items:center}
+header{width:100%;padding:15px 12px 12px;text-align:center;background:#08111de8;border-bottom:1px solid #24445f}
+h1{font-size:19px;letter-spacing:2px;margin:0}header p{font-size:10px;letter-spacing:2px;color:#8caac2;margin:5px 0 0}
+.stage{position:relative;width:min(100vw,760px);aspect-ratio:3/4;background:#000;overflow:hidden;margin:12px auto;border:1px solid #25435d;border-radius:14px;box-shadow:0 12px 45px #0009}
+canvas{width:100%;height:100%;display:block;transform:scaleX(-1)}video{display:none}
+.hud{position:absolute;left:10px;top:10px;padding:7px 10px;background:#07111ddd;border:1px solid #34516a;border-radius:8px;font-size:10px;color:#bce8ff;letter-spacing:.5px}
+.controls{width:min(100% - 24px,760px);display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:10px}
+button{border:1px solid #2e5978;background:linear-gradient(140deg,#142c43,#0a1727);color:#eaf6ff;padding:12px 8px;border-radius:10px;font-weight:700;font-size:12px}
+button.primary{background:linear-gradient(140deg,#087bc0,#06416f);border-color:#49c5ff}
+.hint{width:min(100% - 28px,740px);font-size:12px;line-height:1.6;color:#a8bdce;margin:0 0 20px}
+.hint b{color:#e5f6ff}.error{color:#ffb4a8}
+</style>
+</head>
+<body>
+<header><h1>GOKU CAMERA FX</h1><p>INSTANT TRANSMISSION · KAMEHAMEHA</p></header>
+<div class="stage"><video id="video" playsinline muted></video><canvas id="view"></canvas><div class="hud" id="status">CAMERA OFFLINE</div></div>
+<div class="controls">
+<button class="primary" id="start">START CAMERA</button><button id="stop">STOP CAMERA</button>
+<button id="teleport">TEST INSTANT TRANSMISSION</button><button id="beam">TEST KAMEHAMEHA</button>
+</div>
+<p class="hint"><b>Instant Transmission:</b> Ek haath uthao, index + middle fingers seedhe rakho aur forehead ke paas lao. Aapka body-cutout dissolve hoga, short vanish pause ke baad wapas materialize hoga. <br><b>Kamehameha:</b> Dono palms ko saamne paas lao, charge hone do, phir dono haath camera ki taraf tez push karo. Test button se animation check kar sakte ho. <br>Camera effects sirf is browser preview mein dikhte hain; webpage WhatsApp camera ko replace nahi kar sakta. HTTPS aur camera permission required.</p>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js"></script>
+<script>
+(()=>{
+'use strict';
+const video=document.getElementById('video'),canvas=document.getElementById('view'),ctx=canvas.getContext('2d',{alpha:false});
+const statusEl=document.getElementById('status');
+const W=720,H=960;canvas.width=W;canvas.height=H;
+const person=document.createElement('canvas');person.width=W;person.height=H;const pc=person.getContext('2d');
+const bg=document.createElement('canvas');bg.width=W;bg.height=H;const bc=bg.getContext('2d');
+let stream=null,hands=null,segmenter=null,running=false,raf=0,lastMask=null,lastHands=[];
+let teleport={phase:'idle',start:0},charge=0,beam=null,particles=[],lastPush=0,cooldown=0,lastHandSpan=0;
+let lastFrame=0,handBusy=false,segBusy=false;
+const rand=(a,b)=>a+Math.random()*(b-a),clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+function status(s,err=false){statusEl.textContent=s;statusEl.className='hud'+(err?' error':'')}
+function triggerTeleport(){if(teleport.phase!=='idle')return;teleport={phase:'active',start:performance.now()};}
+function triggerBeam(x=W/2,y=H*.55){beam={start:performance.now(),x,y,duration:1150};charge=0;for(let i=0;i<95;i++)particles.push({x:x+rand(-24,24),y:y+rand(-20,20),vx:rand(-2,2),vy:rand(-8,-2),life:rand(350,900),born:performance.now(),size:rand(1.5,4.5)})}
+function drawNormal(){ctx.clearRect(0,0,W,H);if(video.videoWidth)ctx.drawImage(video,0,0,W,H)}
+function makePersonLayers(){
+ if(!lastMask||!video.videoWidth)return false;
+ pc.clearRect(0,0,W,H);pc.drawImage(video,0,0,W,H);
+ pc.globalCompositeOperation='destination-in';pc.drawImage(lastMask,0,0,W,H);pc.globalCompositeOperation='source-over';
+ bc.clearRect(0,0,W,H);
+ // Soft background-only layer: keeps the scene recognizable while the subject vanishes.
+ bc.save();bc.filter='blur(15px) brightness(.72)';bc.drawImage(video,0,0,W,H);bc.restore();
+ bc.globalCompositeOperation='destination-in';bc.drawImage(lastMask,0,0,W,H);bc.globalCompositeOperation='destination-out';bc.drawImage(lastMask,0,0,W,H);bc.globalCompositeOperation='source-over';
+ return true;
+}
+function drawTeleport(now){
+ if(teleport.phase==='idle')return;
+ const t=now-teleport.start,d=1320;
+ if(t>=d){teleport.phase='idle';return}
+ const valid=makePersonLayers();
+ // During the transition, the camera background is shown normally; the subject layer is animated separately.
+ if(valid){
+   ctx.clearRect(0,0,W,H);ctx.drawImage(video,0,0,W,H);
+   // Cover the subject with a softened background cutout, then composite the animated subject.
+   ctx.save();ctx.globalAlpha=1;ctx.drawImage(bg,0,0);ctx.restore();
+   let alpha=1,scale=1,offsetY=0,blur=0;
+   if(t<470){let p=t/470;alpha=1-p;scale=1-.12*p;offsetY=-22*p;blur=2+12*p}
+   else if(t<690){alpha=0;scale=.82}
+   else{let p=clamp((t-690)/630,0,1);alpha=p;scale=.82+.18*p;offsetY=-22*(1-p);blur=12*(1-p)}
+   if(alpha>0){
+     ctx.save();ctx.globalAlpha=alpha;ctx.filter=`blur(${blur}px)`;
+     const sw=W*scale,sh=H*scale;ctx.drawImage(person,(W-sw)/2,(H-sh)/2+offsetY,sw,sh);ctx.restore();
+   }
+   // Subtle white pressure flash only at the vanish/reappear beats.
+   const flash=t<90?1-t/90:(t>690&&t<790)?1-(t-690)/100:0;
+   if(flash>0){ctx.fillStyle=`rgba(255,255,255,${flash*.22})`;ctx.fillRect(0,0,W,H)}
+ }else{
+   // Fallback if segmentation is unavailable: never leave the camera frozen.
+   const p=t/d;let a=p<.36?p/.36:p<.58?1:(1-p)/.42;
+   ctx.fillStyle=`rgba(255,255,255,${clamp(a,0,1)*.88})`;ctx.fillRect(0,0,W,H);
+ }
+}
+function glowBall(x,y,r,now,power=1){
+ ctx.save();ctx.globalCompositeOperation='lighter';
+ let g=ctx.createRadialGradient(x,y,1,x,y,r*2.8);g.addColorStop(0,'#ffffff');g.addColorStop(.12,'#e9fbff');g.addColorStop(.28,'#65d9ff');g.addColorStop(.55,'rgba(0,135,255,.72)');g.addColorStop(1,'rgba(0,90,255,0)');
+ ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r*2.8,0,Math.PI*2);ctx.fill();
+ for(let k=0;k<3;k++){ctx.strokeStyle=`rgba(${k===0?'210,248,255':'55,174,255'},${.7-k*.15})`;ctx.lineWidth=2+k*.7;ctx.beginPath();ctx.ellipse(x,y,r*(1.15+k*.23),r*(.72+k*.19),now*.001*(k%2?1:-1)+k,0,Math.PI*2);ctx.stroke()}
+ for(let i=0;i<9;i++){let a=now*.003+i*Math.PI*2/9;let rr=r*(1.15+Math.sin(now*.008+i)*.12);ctx.fillStyle='#dffaff';ctx.beginPath();ctx.arc(x+Math.cos(a)*rr,y+Math.sin(a)*rr,2.2,0,Math.PI*2);ctx.fill()}
+ ctx.restore();
+}
+function lightning(x,y,r,now,count=8){
+ ctx.save();ctx.globalCompositeOperation='lighter';ctx.lineCap='round';
+ for(let n=0;n<count;n++){let a=now*.002+n*Math.PI*2/count,ex=x+Math.cos(a)*r*rand(.8,1.5),ey=y+Math.sin(a)*r*rand(.8,1.5);
+ ctx.beginPath();ctx.moveTo(x+Math.cos(a)*r*.45,y+Math.sin(a)*r*.45);
+ for(let j=1;j<=5;j++){let q=j/5;ctx.lineTo(x+Math.cos(a)*r*(.45+q*.95)+rand(-12,12),y+Math.sin(a)*r*(.45+q*.95)+rand(-12,12))}
+ ctx.strokeStyle='rgba(115,220,255,.9)';ctx.lineWidth=rand(1,3);ctx.shadowColor='#36aaff';ctx.shadowBlur=14;ctx.stroke()}
+ ctx.restore();
+}
+function drawCharge(now){
+ if(charge<=.01)return;
+ let x=W/2,y=H*.55;
+ if(lastHands.length>=2){x=(lastHands[0][9].x+lastHands[1][9].x)/2*W;y=(lastHands[0][9].y+lastHands[1][9].y)/2*H}
+ const r=18+charge*48;glowBall(x,y,r,now);lightning(x,y,r*1.3,now,Math.floor(3+charge*9));
+ for(let i=0;i<Math.floor(charge*18);i++){let a=rand(0,Math.PI*2),rr=rand(r,r*2.4);ctx.fillStyle='rgba(160,235,255,.9)';ctx.beginPath();ctx.arc(x+Math.cos(a)*rr,y+Math.sin(a)*rr,rand(1,3),0,Math.PI*2);ctx.fill()}
+}
+function drawBeam(now){
+ if(!beam)return;let age=now-beam.start;if(age>beam.duration){beam=null;return}
+ let p=age/beam.duration,fade=Math.min(1,p*8,(1-p)*7),x=beam.x,y=beam.y;
+ ctx.save();ctx.globalCompositeOperation='lighter';
+ // Expanding muzzle ring
+ let ring=18+age*.19;ctx.strokeStyle=`rgba(135,225,255,${fade*.8})`;ctx.lineWidth=4;ctx.shadowColor='#39bfff';ctx.shadowBlur=24;ctx.beginPath();ctx.ellipse(x,y,ring,ring*.62,0,0,Math.PI*2);ctx.stroke();
+ // Main perspective beam: bright white core, cyan shell and deep-blue outer plasma.
+ let width=(34+Math.sin(age*.035)*8)*fade;
+ const topY=-40,topW=width*2.8;
+ function beamLayer(color,w,blur){ctx.fillStyle=color;ctx.shadowColor='#42bfff';ctx.shadowBlur=blur;ctx.beginPath();ctx.moveTo(x-w,y-8);ctx.lineTo(x-topW,topY);ctx.lineTo(x+topW,topY);ctx.lineTo(x+w,y+8);ctx.closePath();ctx.fill()}
+ beamLayer('rgba(0,88,255,.30)',width*2.6,40);
+ beamLayer('rgba(40,175,255,.62)',width*1.5,32);
+ beamLayer('rgba(205,247,255,.94)',width*.48,22);
+ beamLayer('rgba(255,255,255,.98)',width*.16,12);
+ // Turbulent plasma filaments inside beam
+ for(let k=0;k<8;k++){let yy=((age*1.1+k*137)%900),q=yy/900,xx=x+Math.sin(age*.012+k*2.2)*width*(.7+q*1.4);ctx.strokeStyle=`rgba(170,238,255,${fade*.6})`;ctx.lineWidth=rand(1,3);ctx.beginPath();ctx.moveTo(xx, y-yy);ctx.lineTo(xx+rand(-15,15),y-yy-35);ctx.stroke()}
+ ctx.restore();
+}
+function drawParticles(now){
+ ctx.save();ctx.globalCompositeOperation='lighter';
+ particles=particles.filter(p=>now-p.born<p.life);
+ for(const p of particles){let age=(now-p.born)/p.life;p.x+=p.vx;p.y+=p.vy;p.vy+=.025;ctx.globalAlpha=1-age;ctx.fillStyle='#8ee7ff';ctx.shadowColor='#39baff';ctx.shadowBlur=12;ctx.beginPath();ctx.arc(p.x,p.y,p.size*(1-age*.5),0,Math.PI*2);ctx.fill()}
+ ctx.restore();
+}
+function fingersRaised(lm){return lm[8].y<lm[6].y&&lm[12].y<lm[10].y&&lm[16].y>lm[14].y&&lm[20].y>lm[18].y}
+function onHands(r){
+ lastHands=r.multiHandLandmarks||[];const now=performance.now();
+ if(lastHands.length===1){let lm=lastHands[0];if(fingersRaised(lm)&&lm[8].y<.38&&lm[12].y<.38&&teleport.phase==='idle'&&now>cooldown){triggerTeleport();cooldown=now+2400}}
+ if(lastHands.length>=2){
+   const a=lastHands[0],b=lastHands[1],gap=dist(a[9],b[9]);
+   const palmSize=(dist(a[0],a[9])+dist(b[0],b[9]))/2;
+   if(gap<.27){charge=clamp(charge+.028,0,1);if(!lastPush)lastPush=palmSize}
+   else if(charge>.45){if(palmSize>lastPush*1.18&&now>cooldown){let x=(a[9].x+b[9].x)/2*W,y=(a[9].y+b[9].y)/2*H;triggerBeam(x,y);cooldown=now+1400;lastPush=0}else charge=Math.max(0,charge-.006)}
+   else{charge=Math.max(0,charge-.025);lastPush=0}
+ }else{charge=Math.max(0,charge-.035);lastPush=0}
+}
+async function frame(now){
+ if(!running)return;
+ if(video.readyState>=2){
+   if(!teleport||teleport.phase==='idle')drawNormal();
+   if(teleport.phase!=='idle')drawTeleport(now);
+   drawCharge(now);drawBeam(now);drawParticles(now);
+ }
+ raf=requestAnimationFrame(frame);
+}
+async function start(){
+ try{
+  if(!window.isSecureContext){status('HTTPS REQUIRED',true);return}
+  if(!navigator.mediaDevices?.getUserMedia){status('CAMERA NOT SUPPORTED',true);return}
+  status('REQUESTING CAMERA…');
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:720},height:{ideal:960}},audio:false});
+  video.srcObject=stream;await video.play();
+  if(!window.Hands||!window.SelfieSegmentation){status('AI LIBRARIES FAILED — CHECK INTERNET',true);return}
+  hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+  hands.setOptions({maxNumHands:2,modelComplexity:0,minDetectionConfidence:.62,minTrackingConfidence:.58});
+  hands.onResults(onHands);
+  segmenter=new SelfieSegmentation({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}`});
+  segmenter.setOptions({modelSelection:0});segmenter.onResults(r=>{lastMask=r.segmentationMask||null});
+  running=true;status('CAMERA ONLINE · GESTURE READY');frame(performance.now());processAI();
+ }catch(e){status('CAMERA / AI ERROR — CHECK PERMISSION & INTERNET',true);console.error(e)}
+}
+async function processAI(){
+ if(!running)return;
+ if(video.readyState>=2){
+  try{if(!handBusy){handBusy=true;await hands.send({image:video});handBusy=false}}catch(e){handBusy=false}
+  try{if(!segBusy){segBusy=true;await segmenter.send({image:video});segBusy=false}}catch(e){segBusy=false}
+ }
+ setTimeout(processAI,55);
+}
+function stop(){
+ running=false;cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());
+ stream=null;video.srcObject=null;lastMask=null;lastHands=[];charge=0;beam=null;teleport.phase='idle';status('CAMERA OFFLINE');
+}
+document.getElementById('start').onclick=start;document.getElementById('stop').onclick=stop;
+document.getElementById('teleport').onclick=triggerTeleport;
+document.getElementById('beam').onclick=()=>triggerBeam(W/2,H*.56);
+window.addEventListener('pagehide',stop);
+})();
+</script>
+</body></html>
